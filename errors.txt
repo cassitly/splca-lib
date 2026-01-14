@@ -1,0 +1,83 @@
+(.venv) @cassitly ➜ /workspaces/splca-lib (main) $ python examples/mnist_demo.py
+Using device: cpu
+Starting SPLCA training on MNIST...
+Traceback (most recent call last):
+  File "/workspaces/splca-lib/examples/mnist_demo.py", line 88, in <module>
+    main()
+  File "/workspaces/splca-lib/examples/mnist_demo.py", line 70, in main
+    history = train_splca_model(
+              ^^^^^^^^^^^^^^^^^^
+  File "/workspaces/splca-lib/splca/utils.py", line 46, in train_splca_model
+    output = model(data)
+             ^^^^^^^^^^^
+  File "/workspaces/splca-lib/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/splca-lib/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/splca-lib/splca/models/vision.py", line 39, in forward
+    x = torch.relu(self.fc1(x))
+                   ^^^^^^^^^^^
+  File "/workspaces/splca-lib/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/splca-lib/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/splca-lib/splca/layers.py", line 43, in forward
+    output = self.linear(x)
+             ^^^^^^^^^^^^^^
+  File "/workspaces/splca-lib/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/splca-lib/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/splca-lib/.venv/lib/python3.12/site-packages/torch/nn/modules/linear.py", line 134, in forward
+    return F.linear(input, self.weight, self.bias)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: mat1 and mat2 shapes cannot be multiplied (128x3136 and 4096x128)
+(.venv) @cassitly ➜ /workspaces/splca-lib (main) $ python examples/audio_classification.py
+python: can't open file '/workspaces/splca-lib/examples/audio_classification.py': [Errno 2] No such file or directory
+(.venv) @cassitly ➜ /workspaces/splca-lib (main) $ python examples/audio_classification_demo.py
+Using device: cpu
+
+Starting SPLCA training on audio classification...
+Traceback (most recent call last):
+  File "/workspaces/splca-lib/examples/audio_classification_demo.py", line 84, in <module>
+    main()
+  File "/workspaces/splca-lib/examples/audio_classification_demo.py", line 67, in main
+    history = train_splca_model(
+              ^^^^^^^^^^^^^^^^^^
+  File "/workspaces/splca-lib/splca/utils.py", line 50, in train_splca_model
+    updates = model.get_splca_updates()
+              ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/splca-lib/splca/models/audio.py", line 46, in get_splca_updates
+    error = layer.compute_local_error(next_output)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/splca-lib/splca/layers.py", line 58, in compute_local_error
+    return next_activation.detach() - predicted
+           ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~
+RuntimeError: The size of tensor a (10) must match the size of tensor b (256) at non-singleton dimension 1
+(.venv) @cassitly ➜ /workspaces/splca-lib (main) $ python examples/text_classification_demo.py
+Using device: cpu
+
+Starting SPLCA training on text classification...
+Traceback (most recent call last):
+  File "/workspaces/splca-lib/examples/text_classification_demo.py", line 88, in <module>
+    main()
+  File "/workspaces/splca-lib/examples/text_classification_demo.py", line 71, in main
+    history = train_splca_model(
+              ^^^^^^^^^^^^^^^^^^
+  File "/workspaces/splca-lib/splca/utils.py", line 50, in train_splca_model
+    updates = model.get_splca_updates()
+              ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/splca-lib/splca/models/text.py", line 46, in get_splca_updates
+    error = layer.compute_local_error(next_output)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/splca-lib/splca/layers.py", line 58, in compute_local_error
+    return next_activation.detach() - predicted
+           ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~
+RuntimeError: The size of tensor a (2) must match the size of tensor b (256) at non-singleton dimension 1
+(.venv) @cassitly ➜ /workspaces/splca-lib (main) $ 
