@@ -1,0 +1,1215 @@
+# File structure for pip-installable library:
+# splca/
+# ├── setup.py
+# ├── README.md
+# ├── requirements.txt
+# ├── splca/
+# │   ├── __init__.py
+# │   ├── core.py
+# │   ├── layers.py
+# │   ├── predictors.py
+# │   ├── modulation.py
+# │   ├── models/
+# │   │   ├── __init__.py
+# │   │   ├── text.py
+# │   │   ├── vision.py
+# │   │   └── audio.py
+# │   └── utils.py
+# ├── examples/
+# │   ├── mnist_demo.py
+# │   ├── text_classification_demo.py
+# │   └── audio_classification_demo.py
+# └── tests/
+#     └── test_core.py
+
+# ============================================================================
+# setup.py
+# ============================================================================
+from setuptools import setup, find_packages
+
+with open("README.md", "r", encoding="utf-8") as fh:
+    long_description = fh.read()
+
+setup(
+    name="splca",
+    version="0.1.0",
+    author="Your Name",
+    author_email="your.email@example.com",
+    description="Self-Predictive Local Credit Assignment: Biologically-plausible learning for neural networks",
+    long_description=long_description,
+    long_description_content_type="text/markdown",
+    url="https://github.com/yourusername/splca",
+    packages=find_packages(),
+    classifiers=[
+        "Development Status :: 3 - Alpha",
+        "Intended Audience :: Science/Research",
+        "Topic :: Scientific/Engineering :: Artificial Intelligence",
+        "License :: OSI Approved :: MIT License",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+    ],
+    python_requires=">=3.8",
+    install_requires=[
+        "torch>=2.0.0",
+        "torchvision>=0.15.0",
+        "torchaudio>=2.0.0",
+        "numpy>=1.21.0",
+        "tqdm>=4.62.0",
+        "matplotlib>=3.4.0",
+    ],
+    extras_require={
+        "dev": ["pytest>=7.0.0", "black>=22.0.0", "flake8>=4.0.0"],
+    },
+)
+
+# ============================================================================
+# splca/__init__.py
+# ============================================================================
+"""
+from .core import SPLCAOptimizer
+from .layers import SPLCALinear, SPLCAConv2d
+from .predictors import LinearPredictor, MLPPredictor
+from .modulation import ValidationModulator, RewardModulator
+from .models import TextClassifier, VisionClassifier, AudioClassifier
+
+__version__ = "0.1.0"
+__all__ = [
+    "SPLCAOptimizer",
+    "SPLCALinear", 
+    "SPLCAConv2d",
+    "LinearPredictor",
+    "MLPPredictor",
+    "ValidationModulator",
+    "RewardModulator",
+    "TextClassifier",
+    "VisionClassifier", 
+    "AudioClassifier",
+]
+"""
+
+# ============================================================================
+# splca/core.py
+# ============================================================================
+"""
+import torch
+import torch.nn as nn
+from typing import Dict, List, Optional, Callable
+
+
+class EligibilityTrace:
+    '''Manages eligibility traces for temporal credit assignment.'''
+    
+    def __init__(self, shape: tuple, gamma: float = 0.95, device: str = 'cpu'):
+        self.gamma = gamma
+        self.trace = torch.zeros(shape, device=device)
+        
+    def update(self, presynaptic: torch.Tensor) -> torch.Tensor:
+        '''Update trace: E(t+1) = γ*E(t) + x(t)'''
+        self.trace = self.gamma * self.trace + presynaptic.detach()
+        return self.trace
+    
+    def reset(self):
+        '''Reset trace to zeros'''
+        self.trace.zero_()
+
+
+class SPLCAOptimizer:
+    '''
+    Self-Predictive Local Credit Assignment optimizer.
+    
+    Args:
+        params: Model parameters to optimize
+        lr: Learning rate (η)
+        gamma: Eligibility trace decay factor
+        eta_pred: Learning rate for predictors
+        eta_heb: Hebbian term coefficient
+        eta_stab: Weight stabilization (decay) coefficient
+        predictor_lr: Separate learning rate for predictor networks
+    '''
+    
+    def __init__(
+        self,
+        params,
+        lr: float = 1e-3,
+        gamma: float = 0.95,
+        eta_pred: float = 1e-3,
+        eta_heb: float = 1e-4,
+        eta_stab: float = 1e-5,
+    ):
+        self.param_groups = [{'params': list(params)}]
+        self.lr = lr
+        self.gamma = gamma
+        self.eta_pred = eta_pred
+        self.eta_heb = eta_heb
+        self.eta_stab = eta_stab
+        
+        # Storage for traces and state
+        self.traces: Dict[int, EligibilityTrace] = {}
+        self.prev_activations: Dict[int, torch.Tensor] = {}
+        self.modulatory_scalar = 0.5
+        
+    def zero_grad(self):
+        '''Zero out gradients (compatibility with PyTorch)'''
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is not None:
+                    p.grad.zero_()
+    
+    def set_modulation(self, m: float):
+        '''Set global modulatory scalar m(t)'''
+        self.modulatory_scalar = max(0.0, min(1.0, m))
+    
+    def step(self, layer_updates: List[Dict]):
+        '''
+        Apply SPLCA updates.
+        
+        Args:
+            layer_updates: List of dicts with keys:
+                - 'param': parameter tensor
+                - 'error': local prediction error
+                - 'presyn': presynaptic activations
+                - 'postsyn': postsynaptic activations
+        '''
+        for update_dict in layer_updates:
+            param = update_dict['param']
+            error = update_dict['error']
+            presyn = update_dict['presyn']
+            postsyn = update_dict.get('postsyn', None)
+            
+            param_id = id(param)
+            
+            # Initialize trace if needed
+            if param_id not in self.traces:
+                self.traces[param_id] = EligibilityTrace(
+                    param.shape, self.gamma, param.device
+                )
+            
+            # Update eligibility trace
+            trace = self.traces[param_id].update(presyn)
+            
+            # Compute SPLCA update
+            # Δw = -η·m·e·E
+            delta_w = -self.lr * self.modulatory_scalar * (
+                torch.outer(error.mean(0), trace.mean(0))
+            )
+            
+            # Hebbian term: -η_heb·(y⊗x)
+            if postsyn is not None:
+                hebbian = -self.eta_heb * torch.outer(
+                    postsyn.mean(0), presyn.mean(0)
+                )
+                delta_w += hebbian
+            
+            # Weight stabilization (decay)
+            delta_w -= self.eta_stab * param.data
+            
+            # Apply update
+            param.data += delta_w
+"""
+
+# ============================================================================
+# splca/layers.py
+# ============================================================================
+"""
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Optional
+
+
+class SPLCALinear(nn.Module):
+    '''
+    Linear layer with SPLCA support.
+    Maintains activations and provides hooks for local updates.
+    '''
+    
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        predictor_type: str = 'linear',
+        predictor_hidden: int = 64,
+    ):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features, bias=bias)
+        
+        # Create predictor network
+        if predictor_type == 'linear':
+            self.predictor = nn.Linear(out_features, out_features, bias=False)
+        elif predictor_type == 'mlp':
+            self.predictor = nn.Sequential(
+                nn.Linear(out_features, predictor_hidden),
+                nn.ReLU(),
+                nn.Linear(predictor_hidden, out_features)
+            )
+        
+        self.prev_output = None
+        self.current_input = None
+        self.current_output = None
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.current_input = x.detach()
+        output = self.linear(x)
+        self.current_output = output.detach()
+        return output
+    
+    def predict_next(self) -> Optional[torch.Tensor]:
+        '''Predict next activation using current output'''
+        if self.current_output is None:
+            return None
+        return self.predictor(self.current_output)
+    
+    def compute_local_error(self, next_activation: torch.Tensor) -> torch.Tensor:
+        '''Compute local prediction error: e = y(t+1) - ŷ(t+1)'''
+        predicted = self.predict_next()
+        if predicted is None:
+            return torch.zeros_like(next_activation)
+        return next_activation.detach() - predicted
+    
+    def get_update_dict(self, error: torch.Tensor) -> dict:
+        '''Package data for SPLCA optimizer'''
+        return {
+            'param': self.linear.weight,
+            'error': error,
+            'presyn': self.current_input,
+            'postsyn': self.current_output,
+        }
+
+
+class SPLCAConv2d(nn.Module):
+    '''
+    Convolutional layer with SPLCA support.
+    For vision tasks.
+    '''
+    
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int = 1,
+        padding: int = 0,
+        predictor_hidden: int = 64,
+    ):
+        super().__init__()
+        self.conv = nn.Conv2d(
+            in_channels, out_channels, kernel_size, stride, padding
+        )
+        
+        # Predictor uses 1x1 conv for efficiency
+        self.predictor = nn.Sequential(
+            nn.Conv2d(out_channels, predictor_hidden, 1),
+            nn.ReLU(),
+            nn.Conv2d(predictor_hidden, out_channels, 1)
+        )
+        
+        self.current_input = None
+        self.current_output = None
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.current_input = x.detach()
+        output = self.conv(x)
+        self.current_output = output.detach()
+        return output
+    
+    def predict_next(self) -> Optional[torch.Tensor]:
+        if self.current_output is None:
+            return None
+        return self.predictor(self.current_output)
+    
+    def compute_local_error(self, next_activation: torch.Tensor) -> torch.Tensor:
+        predicted = self.predict_next()
+        if predicted is None:
+            return torch.zeros_like(next_activation)
+        return next_activation.detach() - predicted
+    
+    def get_update_dict(self, error: torch.Tensor) -> dict:
+        # Reshape for outer product computation
+        error_flat = error.flatten(1).mean(0)
+        input_flat = self.current_input.flatten(1).mean(0)
+        return {
+            'param': self.conv.weight,
+            'error': error_flat[:self.conv.out_channels],
+            'presyn': input_flat[:self.conv.in_channels * self.conv.kernel_size[0] * self.conv.kernel_size[1]],
+            'postsyn': self.current_output.flatten(1).mean(0)[:self.conv.out_channels],
+        }
+"""
+
+# ============================================================================
+# splca/predictors.py
+# ============================================================================
+"""
+import torch
+import torch.nn as nn
+
+
+class LinearPredictor(nn.Module):
+    '''Simple linear predictor: ŷ = Wx'''
+    
+    def __init__(self, dim: int):
+        super().__init__()
+        self.linear = nn.Linear(dim, dim, bias=False)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(x)
+
+
+class MLPPredictor(nn.Module):
+    '''MLP predictor with hidden layer'''
+    
+    def __init__(self, dim: int, hidden_dim: int = 64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, dim)
+        )
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class TemporalPredictor(nn.Module):
+    '''Predictor with temporal convolution for sequences'''
+    
+    def __init__(self, dim: int, history: int = 3):
+        super().__init__()
+        self.history = history
+        self.conv = nn.Conv1d(dim, dim, kernel_size=history, padding=history-1)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, seq, dim)
+        x = x.transpose(1, 2)  # (batch, dim, seq)
+        out = self.conv(x)
+        return out[:, :, :x.size(2)].transpose(1, 2)
+"""
+
+# ============================================================================
+# splca/modulation.py
+# ============================================================================
+"""
+import torch
+import torch.nn as nn
+from collections import deque
+
+
+class ValidationModulator:
+    '''
+    Compute modulatory scalar from validation loss improvement.
+    m(t) = sigmoid(α·(-ΔL_val))
+    '''
+    
+    def __init__(self, alpha: float = 1.0, window: int = 10):
+        self.alpha = alpha
+        self.loss_history = deque(maxlen=window)
+        
+    def __call__(self, val_loss: float) -> float:
+        self.loss_history.append(val_loss)
+        
+        if len(self.loss_history) < 2:
+            return 0.5
+        
+        # Compute improvement
+        delta_loss = self.loss_history[-2] - self.loss_history[-1]
+        m = torch.sigmoid(torch.tensor(self.alpha * delta_loss)).item()
+        return m
+
+
+class RewardModulator:
+    '''
+    Compute modulatory scalar from reward signal (RL setting).
+    '''
+    
+    def __init__(self, alpha: float = 1.0, baseline_momentum: float = 0.9):
+        self.alpha = alpha
+        self.baseline = 0.0
+        self.momentum = baseline_momentum
+        
+    def __call__(self, reward: float) -> float:
+        # Update baseline
+        self.baseline = self.momentum * self.baseline + (1 - self.momentum) * reward
+        
+        # Advantage
+        advantage = reward - self.baseline
+        m = torch.sigmoid(torch.tensor(self.alpha * advantage)).item()
+        return m
+
+
+class LearnedModulator(nn.Module):
+    '''
+    Learned modulator network (small MLP).
+    Takes recent statistics and outputs m(t).
+    '''
+    
+    def __init__(self, input_dim: int = 10, hidden_dim: int = 32):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid()
+        )
+        
+    def forward(self, stats: torch.Tensor) -> float:
+        '''stats: tensor of recent metrics (losses, accuracies, etc.)'''
+        return self.net(stats).item()
+"""
+
+# ============================================================================
+# splca/models/text.py
+# ============================================================================
+"""
+import torch
+import torch.nn as nn
+from ..layers import SPLCALinear
+
+
+class TextClassifier(nn.Module):
+    '''
+    Simple text classification model using SPLCA layers.
+    Embeddings → SPLCA Linear → SPLCA Linear → Output
+    '''
+    
+    def __init__(
+        self,
+        vocab_size: int,
+        embed_dim: int = 128,
+        hidden_dim: int = 256,
+        num_classes: int = 2,
+        max_length: int = 512,
+    ):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        self.fc1 = SPLCALinear(embed_dim, hidden_dim)
+        self.fc2 = SPLCALinear(hidden_dim, num_classes)
+        self.splca_layers = [self.fc1, self.fc2]
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, seq_len) token ids
+        x = self.embedding(x)  # (batch, seq, embed)
+        x = x.mean(dim=1)  # simple pooling
+        x = torch.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+    
+    def get_splca_updates(self) -> list:
+        '''Collect update dicts from all SPLCA layers'''
+        updates = []
+        
+        # Compute predictions and errors
+        for i, layer in enumerate(self.splca_layers[:-1]):
+            next_layer = self.splca_layers[i + 1]
+            next_output = next_layer.current_output
+            if next_output is not None:
+                error = layer.compute_local_error(next_output)
+                updates.append(layer.get_update_dict(error))
+        
+        # Last layer uses output error (if available via external signal)
+        return updates
+"""
+
+# ============================================================================
+# splca/models/vision.py
+# ============================================================================
+"""
+import torch
+import torch.nn as nn
+from ..layers import SPLCAConv2d, SPLCALinear
+
+
+class VisionClassifier(nn.Module):
+    '''
+    CNN for image classification using SPLCA layers.
+    Conv → Conv → Pool → Linear → Linear → Output
+    '''
+    
+    def __init__(
+        self,
+        in_channels: int = 3,
+        num_classes: int = 10,
+        hidden_dim: int = 128,
+    ):
+        super().__init__()
+        self.conv1 = SPLCAConv2d(in_channels, 32, kernel_size=3, padding=1)
+        self.conv2 = SPLCAConv2d(32, 64, kernel_size=3, padding=1)
+        self.pool = nn.MaxPool2d(2, 2)
+        
+        # Compute flattened size (depends on input resolution)
+        # Assuming 32x32 input → after 2 pools: 8x8
+        self.fc1 = SPLCALinear(64 * 8 * 8, hidden_dim)
+        self.fc2 = SPLCALinear(hidden_dim, num_classes)
+        
+        self.splca_layers = [self.conv1, self.conv2, self.fc1, self.fc2]
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = torch.relu(self.conv1(x))
+        x = self.pool(x)
+        x = torch.relu(self.conv2(x))
+        x = self.pool(x)
+        x = x.flatten(1)
+        x = torch.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+    
+    def get_splca_updates(self) -> list:
+        updates = []
+        for i, layer in enumerate(self.splca_layers[:-1]):
+            next_layer = self.splca_layers[i + 1]
+            next_output = next_layer.current_output
+            if next_output is not None:
+                error = layer.compute_local_error(next_output)
+                updates.append(layer.get_update_dict(error))
+        return updates
+"""
+
+# ============================================================================
+# splca/models/audio.py
+# ============================================================================
+"""
+import torch
+import torch.nn as nn
+from ..layers import SPLCALinear
+
+
+class AudioClassifier(nn.Module):
+    '''
+    Audio classification using 1D convolutions + SPLCA linear layers.
+    For waveform or spectrogram inputs.
+    '''
+    
+    def __init__(
+        self,
+        input_dim: int = 128,  # e.g., mel bins
+        num_classes: int = 10,
+        hidden_dim: int = 256,
+    ):
+        super().__init__()
+        # Simple architecture: input → linear layers
+        # (For real use, add Conv1d layers)
+        self.fc1 = SPLCALinear(input_dim, hidden_dim)
+        self.fc2 = SPLCALinear(hidden_dim, hidden_dim)
+        self.fc3 = SPLCALinear(hidden_dim, num_classes)
+        
+        self.splca_layers = [self.fc1, self.fc2, self.fc3]
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, time, features) or (batch, features)
+        if x.dim() == 3:
+            x = x.mean(dim=1)  # temporal pooling
+        
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        x = self.fc3(x)
+        return x
+    
+    def get_splca_updates(self) -> list:
+        updates = []
+        for i, layer in enumerate(self.splca_layers[:-1]):
+            next_layer = self.splca_layers[i + 1]
+            next_output = next_layer.current_output
+            if next_output is not None:
+                error = layer.compute_local_error(next_output)
+                updates.append(layer.get_update_dict(error))
+        return updates
+"""
+
+# ============================================================================
+# splca/utils.py
+# ============================================================================
+"""
+import torch
+import matplotlib.pyplot as plt
+from typing import List, Dict
+
+
+def train_splca_model(
+    model,
+    train_loader,
+    val_loader,
+    optimizer,
+    modulator,
+    epochs: int = 10,
+    device: str = 'cpu',
+):
+    '''
+    Training loop for SPLCA models.
+    
+    Args:
+        model: SPLCA model (TextClassifier, VisionClassifier, etc.)
+        train_loader: DataLoader for training
+        val_loader: DataLoader for validation
+        optimizer: SPLCAOptimizer instance
+        modulator: Modulator instance (ValidationModulator, etc.)
+        epochs: Number of training epochs
+        device: Device to train on
+    
+    Returns:
+        Dictionary with training history
+    '''
+    model.to(device)
+    history = {'train_loss': [], 'val_loss': [], 'val_acc': [], 'modulation': []}
+    
+    criterion = torch.nn.CrossEntropyLoss()
+    
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0.0
+        
+        for batch_idx, (data, target) in enumerate(train_loader):
+            data, target = data.to(device), target.to(device)
+            
+            # Forward pass
+            output = model(data)
+            loss = criterion(output, target)
+            
+            # Get SPLCA updates
+            updates = model.get_splca_updates()
+            
+            # Apply SPLCA update
+            optimizer.step(updates)
+            
+            # Update predictors (separate backward pass)
+            for layer in model.splca_layers:
+                if hasattr(layer, 'predictor'):
+                    pred_out = layer.predict_next()
+                    if pred_out is not None and layer.current_output is not None:
+                        pred_loss = ((pred_out - layer.current_output.detach())**2).mean()
+                        pred_loss.backward()
+                        # Simple SGD update for predictor
+                        for p in layer.predictor.parameters():
+                            if p.grad is not None:
+                                p.data -= optimizer.eta_pred * p.grad
+                                p.grad.zero_()
+            
+            train_loss += loss.item()
+        
+        # Validation
+        model.eval()
+        val_loss = 0.0
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            for data, target in val_loader:
+                data, target = data.to(device), target.to(device)
+                output = model(data)
+                val_loss += criterion(output, target).item()
+                pred = output.argmax(dim=1)
+                correct += (pred == target).sum().item()
+                total += target.size(0)
+        
+        val_loss /= len(val_loader)
+        val_acc = correct / total
+        
+        # Update modulation
+        m = modulator(val_loss)
+        optimizer.set_modulation(m)
+        
+        # Record history
+        history['train_loss'].append(train_loss / len(train_loader))
+        history['val_loss'].append(val_loss)
+        history['val_acc'].append(val_acc)
+        history['modulation'].append(m)
+        
+        print(f'Epoch {epoch+1}/{epochs} - '
+              f'Train Loss: {train_loss/len(train_loader):.4f}, '
+              f'Val Loss: {val_loss:.4f}, '
+              f'Val Acc: {val_acc:.4f}, '
+              f'Modulation: {m:.3f}')
+    
+    return history
+
+
+def plot_training_history(history: Dict[str, List[float]], save_path: str = None):
+    '''Plot training curves'''
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    
+    # Loss curves
+    axes[0, 0].plot(history['train_loss'], label='Train Loss')
+    axes[0, 0].plot(history['val_loss'], label='Val Loss')
+    axes[0, 0].set_xlabel('Epoch')
+    axes[0, 0].set_ylabel('Loss')
+    axes[0, 0].legend()
+    axes[0, 0].set_title('Training and Validation Loss')
+    
+    # Accuracy
+    axes[0, 1].plot(history['val_acc'])
+    axes[0, 1].set_xlabel('Epoch')
+    axes[0, 1].set_ylabel('Accuracy')
+    axes[0, 1].set_title('Validation Accuracy')
+    
+    # Modulation
+    axes[1, 0].plot(history['modulation'])
+    axes[1, 0].set_xlabel('Epoch')
+    axes[1, 0].set_ylabel('m(t)')
+    axes[1, 0].set_title('Global Modulatory Scalar')
+    
+    # Remove empty subplot
+    fig.delaxes(axes[1, 1])
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path)
+    plt.show()
+"""
+
+# ============================================================================
+# examples/mnist_demo.py
+# ============================================================================
+"""
+'''
+SPLCA MNIST Demo
+Run with: python examples/mnist_demo.py
+'''
+
+import torch
+import torch.nn as nn
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
+
+from splca import SPLCAOptimizer, VisionClassifier, ValidationModulator
+from splca.utils import train_splca_model, plot_training_history
+
+
+def main():
+    # Hyperparameters
+    BATCH_SIZE = 128
+    EPOCHS = 20
+    LEARNING_RATE = 1e-3
+    GAMMA = 0.95
+    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    print(f'Using device: {DEVICE}')
+    
+    # Data loading
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,))
+    ])
+    
+    train_dataset = datasets.MNIST(
+        './data', train=True, download=True, transform=transform
+    )
+    test_dataset = datasets.MNIST(
+        './data', train=False, transform=transform
+    )
+    
+    train_loader = DataLoader(
+        train_dataset, batch_size=BATCH_SIZE, shuffle=True
+    )
+    test_loader = DataLoader(
+        test_dataset, batch_size=BATCH_SIZE, shuffle=False
+    )
+    
+    # Model
+    model = VisionClassifier(
+        in_channels=1,
+        num_classes=10,
+        hidden_dim=128
+    )
+    
+    # SPLCA optimizer
+    optimizer = SPLCAOptimizer(
+        model.parameters(),
+        lr=LEARNING_RATE,
+        gamma=GAMMA,
+        eta_pred=1e-3,
+        eta_heb=1e-4,
+        eta_stab=1e-5
+    )
+    
+    # Modulator
+    modulator = ValidationModulator(alpha=1.0)
+    
+    # Train
+    print('
+Starting SPLCA training on MNIST...')
+    history = train_splca_model(
+        model=model,
+        train_loader=train_loader,
+        val_loader=test_loader,
+        optimizer=optimizer,
+        modulator=modulator,
+        epochs=EPOCHS,
+        device=DEVICE
+    )
+    
+    # Plot results
+    plot_training_history(history, save_path='mnist_splca_results.png')
+    
+    print(f'
+Final validation accuracy: {history["val_acc"][-1]:.4f}')
+    print('Results saved to mnist_splca_results.png')
+
+
+if __name__ == '__main__':
+    main()
+"""
+
+# ============================================================================
+# examples/text_classification_demo.py
+# ============================================================================
+"""
+'''
+SPLCA Text Classification Demo
+Simple sentiment analysis on dummy data
+Run with: python examples/text_classification_demo.py
+'''
+
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+
+from splca import SPLCAOptimizer, TextClassifier, ValidationModulator
+from splca.utils import train_splca_model, plot_training_history
+
+
+class SimpleTextDataset(Dataset):
+    '''Dummy text dataset for demo'''
+    def __init__(self, num_samples=1000, vocab_size=5000, max_length=50):
+        self.data = torch.randint(0, vocab_size, (num_samples, max_length))
+        self.labels = torch.randint(0, 2, (num_samples,))
+    
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        return self.data[idx], self.labels[idx]
+
+
+def main():
+    # Hyperparameters
+    VOCAB_SIZE = 5000
+    EMBED_DIM = 128
+    HIDDEN_DIM = 256
+    NUM_CLASSES = 2
+    BATCH_SIZE = 64
+    EPOCHS = 15
+    LEARNING_RATE = 1e-3
+    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    print(f'Using device: {DEVICE}')
+    
+    # Create dummy datasets
+    train_dataset = SimpleTextDataset(num_samples=2000)
+    test_dataset = SimpleTextDataset(num_samples=500)
+    
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    
+    # Model
+    model = TextClassifier(
+        vocab_size=VOCAB_SIZE,
+        embed_dim=EMBED_DIM,
+        hidden_dim=HIDDEN_DIM,
+        num_classes=NUM_CLASSES
+    )
+    
+    # SPLCA optimizer
+    optimizer = SPLCAOptimizer(
+        model.parameters(),
+        lr=LEARNING_RATE,
+        gamma=0.95
+    )
+    
+    # Modulator
+    modulator = ValidationModulator(alpha=1.0)
+    
+    # Train
+    print('\nStarting SPLCA training on text classification...')
+    history = train_splca_model(
+        model=model,
+        train_loader=train_loader,
+        val_loader=test_loader,
+        optimizer=optimizer,
+        modulator=modulator,
+        epochs=EPOCHS,
+        device=DEVICE
+    )
+    
+    # Plot results
+    plot_training_history(history, save_path='text_splca_results.png')
+    
+    print(f'\nFinal validation accuracy: {history["val_acc"][-1]:.4f}')
+
+
+if __name__ == '__main__':
+    main()
+"""
+
+# ============================================================================
+# examples/audio_classification_demo.py
+# ============================================================================
+"""
+'''
+SPLCA Audio Classification Demo
+Run with: python examples/audio_classification_demo.py
+'''
+
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+from splca import SPLCAOptimizer, AudioClassifier, ValidationModulator
+from splca.utils import train_splca_model, plot_training_history
+
+
+class SimpleAudioDataset(Dataset):
+    '''Dummy audio dataset (e.g., mel spectrograms)'''
+    def __init__(self, num_samples=1000, input_dim=128):
+        self.data = torch.randn(num_samples, input_dim)
+        self.labels = torch.randint(0, 10, (num_samples,))
+    
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        return self.data[idx], self.labels[idx]
+
+
+def main():
+    # Hyperparameters
+    INPUT_DIM = 128  # e.g., 128 mel bins
+    NUM_CLASSES = 10
+    HIDDEN_DIM = 256
+    BATCH_SIZE = 64
+    EPOCHS = 15
+    LEARNING_RATE = 1e-3
+    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    print(f'Using device: {DEVICE}')
+    
+    # Create datasets
+    train_dataset = SimpleAudioDataset(num_samples=2000)
+    test_dataset = SimpleAudioDataset(num_samples=500)
+    
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    
+    # Model
+    model = AudioClassifier(
+        input_dim=INPUT_DIM,
+        num_classes=NUM_CLASSES,
+        hidden_dim=HIDDEN_DIM
+    )
+    
+    # SPLCA optimizer
+    optimizer = SPLCAOptimizer(
+        model.parameters(),
+        lr=LEARNING_RATE,
+        gamma=0.95
+    )
+    
+    # Modulator
+    modulator = ValidationModulator(alpha=1.0)
+    
+    # Train
+    print('\nStarting SPLCA training on audio classification...')
+    history = train_splca_model(
+        model=model,
+        train_loader=train_loader,
+        val_loader=test_loader,
+        optimizer=optimizer,
+        modulator=modulator,
+        epochs=EPOCHS,
+        device=DEVICE
+    )
+    
+    # Plot results
+    plot_training_history(history, save_path='audio_splca_results.png')
+    
+    print(f'\nFinal validation accuracy: {history["val_acc"][-1]:.4f}')
+
+
+if __name__ == '__main__':
+    main()
+"""
+
+# ============================================================================
+# README.md
+# ============================================================================
+"""
+# SPLCA: Self-Predictive Local Credit Assignment
+
+A PyTorch library implementing biologically-plausible learning with local prediction error, eligibility traces, and global modulation.
+
+## Installation
+
+```bash
+pip install splca
+```
+
+Or install from source:
+
+```bash
+git clone https://github.com/yourusername/splca.git
+cd splca
+pip install -e .
+```
+
+## Quick Start
+
+### Vision (MNIST)
+
+```python
+from splca import VisionClassifier, SPLCAOptimizer, ValidationModulator
+from splca.utils import train_splca_model
+
+model = VisionClassifier(in_channels=1, num_classes=10)
+optimizer = SPLCAOptimizer(model.parameters(), lr=1e-3, gamma=0.95)
+modulator = ValidationModulator(alpha=1.0)
+
+history = train_splca_model(
+    model, train_loader, val_loader, 
+    optimizer, modulator, epochs=20
+)
+```
+
+### Text Classification
+
+```python
+from splca import TextClassifier, SPLCAOptimizer, ValidationModulator
+
+model = TextClassifier(
+    vocab_size=5000, 
+    embed_dim=128, 
+    hidden_dim=256, 
+    num_classes=2
+)
+optimizer = SPLCAOptimizer(model.parameters())
+modulator = ValidationModulator()
+
+history = train_splca_model(
+    model, train_loader, val_loader,
+    optimizer, modulator, epochs=15
+)
+```
+
+### Audio Classification
+
+```python
+from splca import AudioClassifier, SPLCAOptimizer, ValidationModulator
+
+model = AudioClassifier(input_dim=128, num_classes=10)
+optimizer = SPLCAOptimizer(model.parameters())
+modulator = ValidationModulator()
+
+history = train_splca_model(
+    model, train_loader, val_loader,
+    optimizer, modulator, epochs=15
+)
+```
+
+## How It Works
+
+SPLCA replaces backpropagation with local learning rules:
+
+1. **Local Prediction**: Each layer predicts its next activation
+2. **Prediction Error**: e = y(t+1) - ŷ(t+1)
+3. **Eligibility Traces**: E(t+1) = γE(t) + x
+4. **Global Modulation**: Scalar m(t) from validation improvement
+5. **Update Rule**: Δw = -η·m·e·E - η_heb·Hebbian - η_s·decay
+
+## Key Features
+
+- ✅ **Biologically plausible** - local updates, no backprop
+- ✅ **Temporal credit assignment** - eligibility traces handle delays
+- ✅ **Multi-modal** - supports text, vision, audio
+- ✅ **Easy integration** - drop-in replacement for standard layers
+- ✅ **Modular design** - swap predictors, modulators, layers
+
+## Examples
+
+Run the demos:
+
+```bash
+python examples/mnist_demo.py
+python examples/text_classification_demo.py
+python examples/audio_classification_demo.py
+```
+
+## Architecture
+
+```
+splca/
+├── core.py          # SPLCAOptimizer, EligibilityTrace
+├── layers.py        # SPLCALinear, SPLCAConv2d
+├── predictors.py    # LinearPredictor, MLPPredictor
+├── modulation.py    # ValidationModulator, RewardModulator
+├── models/
+│   ├── text.py      # TextClassifier
+│   ├── vision.py    # VisionClassifier
+│   └── audio.py     # AudioClassifier
+└── utils.py         # Training utilities
+```
+
+## Hyperparameters
+
+- `lr` (η): Main learning rate (1e-3 to 1e-4)
+- `gamma` (γ): Eligibility trace decay (0.9-0.99)
+- `eta_pred`: Predictor learning rate (1e-3)
+- `eta_heb`: Hebbian term coefficient (1e-4)
+- `eta_stab`: Weight decay coefficient (1e-5)
+
+## Citation
+
+If you use this library, please cite:
+
+```bibtex
+@software{splca2024,
+  title={SPLCA: Self-Predictive Local Credit Assignment},
+  author={Your Name},
+  year={2024},
+  url={https://github.com/yourusername/splca}
+}
+```
+
+## License
+
+MIT License
+
+## Contributing
+
+Contributions welcome! Please open an issue or PR.
+"""
+
+# ============================================================================
+# requirements.txt
+# ============================================================================
+"""
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+numpy>=1.21.0
+tqdm>=4.62.0
+matplotlib>=3.4.0
+"""
+
+# ============================================================================
+# INSTALLATION INSTRUCTIONS
+# ============================================================================
+"""
+To create the pip-installable package:
+
+1. Create directory structure:
+   mkdir -p splca/splca/models examples tests
+   
+2. Copy all code sections above into respective files
+
+3. Install in development mode:
+   cd splca
+   pip install -e .
+
+4. Run demos:
+   python examples/mnist_demo.py
+   python examples/text_classification_demo.py
+   python examples/audio_classification_demo.py
+
+5. To publish to PyPI:
+   pip install build twine
+   python -m build
+   twine upload dist/*
+"""
