@@ -93,100 +93,89 @@ class SPLCAOptimizer:
                     param.shape, self.gamma, param.device
                 )
             
-            # Process dimensions
-            if error.dim() > 1:
-                error_mean = error.mean(0)
-            else:
-                error_mean = error
-            
-            if presyn.dim() > 1:
-                presyn_mean = presyn.mean(0)
-            else:
-                presyn_mean = presyn
-            
-            # CRITICAL FIX: Handle trace update based on parameter type
             trace = self.traces[param_id]
             
+            # Aggregate batch dimension for all inputs
+            if error.dim() > 1:
+                error = error.mean(0)
+            if presyn.dim() > 1:
+                presyn = presyn.mean(0)
+            if postsyn is not None and postsyn.dim() > 1:
+                postsyn = postsyn.mean(0)
+            
+            # Flatten all tensors
+            error = error.flatten()
+            presyn = presyn.flatten()
+            if postsyn is not None:
+                postsyn = postsyn.flatten()
+            
+            # Handle different parameter types
             if param.dim() == 2:  # Linear layer: (out_features, in_features)
-                # Ensure presyn_mean matches in_features
-                if presyn_mean.numel() >= param.size(1):
-                    presyn_update = presyn_mean.flatten()[:param.size(1)]
-                else:
-                    presyn_update = torch.zeros(param.size(1), device=param.device)
-                    presyn_update[:presyn_mean.numel()] = presyn_mean.flatten()
+                out_features, in_features = param.shape
                 
-                # Broadcast to trace shape
-                presyn_broadcast = presyn_update.view(1, -1).expand(param.size(0), -1)
+                # Ensure error matches out_features
+                if error.numel() < out_features:
+                    error_padded = torch.zeros(out_features, device=param.device)
+                    error_padded[:error.numel()] = error
+                    error = error_padded
+                else:
+                    error = error[:out_features]
+                
+                # Ensure presyn matches in_features
+                if presyn.numel() < in_features:
+                    presyn_padded = torch.zeros(in_features, device=param.device)
+                    presyn_padded[:presyn.numel()] = presyn
+                    presyn = presyn_padded
+                else:
+                    presyn = presyn[:in_features]
+                
+                # Update trace: broadcast presyn to match param shape
+                presyn_broadcast = presyn.view(1, -1).expand(out_features, -1)
                 trace.trace = self.gamma * trace.trace + presyn_broadcast.detach()
                 
-            elif param.dim() == 4:  # Conv layer: (out_channels, in_channels, kH, kW)
-                # For conv layers, just use a scalar update per weight
-                # Simplified: average the input and broadcast
-                presyn_scalar = presyn_mean.mean()
-                trace.trace = self.gamma * trace.trace + presyn_scalar.detach()
-            else:
-                # Default: try to match shapes
-                try:
-                    presyn_reshaped = presyn_mean.view_as(trace.trace)
-                    trace.trace = self.gamma * trace.trace + presyn_reshaped.detach()
-                except:
-                    # Fallback: use scalar
-                    presyn_scalar = presyn_mean.mean()
-                    trace.trace = self.gamma * trace.trace + presyn_scalar.detach()
-            
-            # Compute SPLCA update: Δw = -η·m·e·E
-            if param.dim() == 2:  # Linear layer
-                # Ensure error_mean matches out_features
-                if error_mean.numel() >= param.size(0):
-                    error_update = error_mean.flatten()[:param.size(0)]
-                else:
-                    error_update = torch.zeros(param.size(0), device=param.device)
-                    error_update[:error_mean.numel()] = error_mean.flatten()
+                # Compute SPLCA update: Δw = -η·m·e·E
+                error_broadcast = error.view(-1, 1).expand(out_features, in_features)
+                delta_w = -self.lr * self.modulatory_scalar * (error_broadcast * trace.trace)
                 
-                # Outer product-like update
-                error_expanded = error_update.view(-1, 1)
-                delta_w = -self.lr * self.modulatory_scalar * (error_expanded * trace.trace)
-                
-            elif param.dim() == 4:  # Conv layer
-                # Element-wise for conv
-                if error_mean.numel() >= param.size(0):
-                    error_update = error_mean.flatten()[:param.size(0)]
-                else:
-                    error_update = torch.zeros(param.size(0), device=param.device)
-                    error_update[:error_mean.numel()] = error_mean.flatten()
-                
-                # Broadcast error to all kernel positions
-                error_expanded = error_update.view(-1, 1, 1, 1).expand_as(param)
-                delta_w = -self.lr * self.modulatory_scalar * (error_expanded * trace.trace)
-            else:
-                # Default element-wise
-                delta_w = -self.lr * self.modulatory_scalar * (error_mean.view_as(param) * trace.trace)
-            
-            # Hebbian term
-            if postsyn is not None:
-                if postsyn.dim() > 1:
-                    postsyn_mean = postsyn.mean(0)
-                else:
-                    postsyn_mean = postsyn
-                
-                if param.dim() == 2:
-                    # Ensure dimensions match
-                    if postsyn_mean.numel() >= param.size(0):
-                        post_update = postsyn_mean.flatten()[:param.size(0)]
+                # Hebbian term: -η_heb·(y⊗x)
+                if postsyn is not None:
+                    # Ensure postsyn matches out_features
+                    if postsyn.numel() < out_features:
+                        postsyn_padded = torch.zeros(out_features, device=param.device)
+                        postsyn_padded[:postsyn.numel()] = postsyn
+                        postsyn = postsyn_padded
                     else:
-                        post_update = torch.zeros(param.size(0), device=param.device)
-                        post_update[:postsyn_mean.numel()] = postsyn_mean.flatten()
+                        postsyn = postsyn[:out_features]
                     
-                    if presyn_mean.numel() >= param.size(1):
-                        pre_update = presyn_mean.flatten()[:param.size(1)]
-                    else:
-                        pre_update = torch.zeros(param.size(1), device=param.device)
-                        pre_update[:presyn_mean.numel()] = presyn_mean.flatten()
-                    
-                    hebbian = -self.eta_heb * torch.outer(post_update, pre_update)
+                    hebbian = -self.eta_heb * torch.outer(postsyn, presyn)
                     delta_w = delta_w + hebbian
+                
+            elif param.dim() == 4:  # Conv layer: (out_channels, in_channels, kH, kW)
+                out_ch, in_ch, kH, kW = param.shape
+                
+                # For conv, use scalar updates (simplified)
+                error_scalar = error.mean() if error.numel() > 0 else torch.tensor(0.0, device=param.device)
+                presyn_scalar = presyn.mean() if presyn.numel() > 0 else torch.tensor(0.0, device=param.device)
+                
+                # Update trace with scalar
+                trace.trace = self.gamma * trace.trace + presyn_scalar.detach()
+                
+                # Scalar update broadcasted
+                delta_w = -self.lr * self.modulatory_scalar * error_scalar * trace.trace
+                
+                # Simplified Hebbian for conv
+                if postsyn is not None:
+                    postsyn_scalar = postsyn.mean() if postsyn.numel() > 0 else torch.tensor(0.0, device=param.device)
+                    hebbian_scalar = -self.eta_heb * postsyn_scalar * presyn_scalar
+                    delta_w = delta_w + hebbian_scalar
             
-            # Weight decay
+            else:
+                # For other param types, use element-wise update
+                error_scalar = error.mean()
+                trace.trace = self.gamma * trace.trace + presyn.mean().detach()
+                delta_w = -self.lr * self.modulatory_scalar * error_scalar * trace.trace
+            
+            # Weight stabilization (decay)
             delta_w = delta_w - self.eta_stab * param.data
             
             # Apply update
