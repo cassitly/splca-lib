@@ -34,7 +34,7 @@ class SPLCALinear(nn.Module):
                 nn.Linear(predictor_hidden, out_features)
             )
         
-        self.prev_output = None  # FIXED: Added this line
+        self.prev_output = None
         self.current_input = None
         self.current_output = None
         
@@ -42,14 +42,14 @@ class SPLCALinear(nn.Module):
         self.current_input = x.detach()
         output = self.linear(x)
         
-        # FIXED: Store previous before updating current
+        # Store previous before updating current
         self.prev_output = self.current_output
         self.current_output = output.detach()
         return output
     
     def predict_next(self) -> Optional[torch.Tensor]:
         '''Predict next activation using previous output'''
-        if self.prev_output is None:  # FIXED: Use prev_output
+        if self.prev_output is None:
             return None
         return self.predictor(self.prev_output)
     
@@ -73,7 +73,7 @@ class SPLCALinear(nn.Module):
 class SPLCAConv2d(nn.Module):
     '''
     Convolutional layer with SPLCA support.
-    For vision tasks.
+    For vision tasks - uses spatial predictors.
     '''
     
     def __init__(
@@ -83,21 +83,21 @@ class SPLCAConv2d(nn.Module):
         kernel_size: int,
         stride: int = 1,
         padding: int = 0,
-        predictor_hidden: int = 64,
+        predictor_hidden: int = 16,  # Smaller for conv
     ):
         super().__init__()
         self.conv = nn.Conv2d(
             in_channels, out_channels, kernel_size, stride, padding
         )
         
-        # Predictor uses 1x1 conv for efficiency
+        # Predictor uses 1x1 conv - predicts same spatial size
         self.predictor = nn.Sequential(
             nn.Conv2d(out_channels, predictor_hidden, 1),
             nn.ReLU(),
             nn.Conv2d(predictor_hidden, out_channels, 1)
         )
         
-        self.prev_output = None  # FIXED: Added this line
+        self.prev_output = None
         self.current_input = None
         self.current_output = None
         
@@ -105,29 +105,41 @@ class SPLCAConv2d(nn.Module):
         self.current_input = x.detach()
         output = self.conv(x)
         
-        # FIXED: Store previous before updating current
+        # Store previous before updating
         self.prev_output = self.current_output
         self.current_output = output.detach()
         return output
     
     def predict_next(self) -> Optional[torch.Tensor]:
-        if self.prev_output is None:  # FIXED: Use prev_output
+        if self.prev_output is None:
             return None
         return self.predictor(self.prev_output)
     
     def compute_local_error(self, target_activation: torch.Tensor) -> torch.Tensor:
+        '''Compute spatial prediction error'''
         predicted = self.predict_next()
         if predicted is None:
             return torch.zeros_like(target_activation)
         return target_activation.detach() - predicted
     
     def get_update_dict(self, error: torch.Tensor) -> dict:
-        # Reshape for outer product computation
-        error_flat = error.flatten(1).mean(0)
-        input_flat = self.current_input.flatten(1).mean(0)
+        '''
+        Package data for SPLCA optimizer.
+        For conv layers, we aggregate spatially.
+        '''
+        # error shape: (batch, out_channels, H, W)
+        # Aggregate over batch and spatial dimensions
+        error_aggregated = error.mean(dim=[0, 2, 3])  # (out_channels,)
+        
+        # Input aggregated
+        input_aggregated = self.current_input.mean(dim=[0, 2, 3])  # (in_channels,)
+        
+        # Output aggregated
+        output_aggregated = self.current_output.mean(dim=[0, 2, 3])  # (out_channels,)
+        
         return {
             'param': self.conv.weight,
-            'error': error_flat[:self.conv.out_channels],
-            'presyn': input_flat[:self.conv.in_channels * self.conv.kernel_size[0] * self.conv.kernel_size[1]],
-            'postsyn': self.current_output.flatten(1).mean(0)[:self.conv.out_channels],
+            'error': error_aggregated,
+            'presyn': input_aggregated,
+            'postsyn': output_aggregated,
         }
