@@ -37,6 +37,7 @@ class SPLCALinear(nn.Module):
         self.prev_output = None
         self.current_input = None
         self.current_output = None
+        self.eligibility_trace = None
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         self.current_input = x.detach()
@@ -48,33 +49,43 @@ class SPLCALinear(nn.Module):
         return output
     
     def predict_next(self) -> Optional[torch.Tensor]:
-        '''Predict next activation using previous output'''
+        '''
+        Predict next activation using the predictor network.
+        '''
         if self.prev_output is None:
             return None
         return self.predictor(self.prev_output)
-    
-    def compute_local_error(self, target_activation: torch.Tensor) -> torch.Tensor:
-        '''Compute local prediction error: e = y(t) - ŷ(t) predicted from y(t-1)'''
-        predicted = self.predict_next()
-        if predicted is None:
-            return torch.zeros_like(target_activation)
 
-        # Ensure sizes match
-        if predicted.size() != target_activation.size():
-            min_size = [min(predicted.size(i), target_activation.size(i)) for i in range(len(predicted.size()))]
-            predicted = predicted[tuple(slice(0, s) for s in min_size)]
-            target_activation = target_activation[tuple(slice(0, s) for s in min_size)]
+    def compute_local_error(self) -> Optional[torch.Tensor]:
+        '''
+        Compute local prediction error.
+        '''
+        if self.current_output is None or self.prev_output is None:
+            return None
+        predicted_next = self.predict_next()
+        if predicted_next is None:
+            return None
+        return self.current_output - predicted_next
 
-        return target_activation.detach() - predicted
-    
-    def get_update_dict(self, error: torch.Tensor) -> dict:
-        '''Package data for SPLCA optimizer'''
-        return {
-            'param': self.linear.weight,
-            'error': error,
-            'presyn': self.current_input,
-            'postsyn': self.current_output,
-        }
+    def update_eligibility_trace(self, gamma: float = 0.95):
+        '''
+        Update eligibility trace.
+        '''
+        if self.current_input is None:
+            return
+        if self.eligibility_trace is None:
+            self.eligibility_trace = torch.zeros_like(self.linear.weight)
+        self.eligibility_trace = gamma * self.eligibility_trace + self.current_input.mean(dim=0).unsqueeze(0)
+
+    def apply_splca_update(self, learning_rate: float, modulatory_scalar: float):
+        '''
+        Apply SPLCA weight update.
+        '''
+        local_error = self.compute_local_error()
+        if local_error is None or self.eligibility_trace is None:
+            return
+        delta_w = -learning_rate * modulatory_scalar * (local_error.mean(dim=0).unsqueeze(1) @ self.eligibility_trace)
+        self.linear.weight.data += delta_w
 
 
 class SPLCAConv2d(nn.Module):

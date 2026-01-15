@@ -32,7 +32,7 @@ def main():
     NUM_CLASSES = 10
     HIDDEN_DIM = 256
     BATCH_SIZE = 64
-    EPOCHS = 15
+    EPOCHS = 115
     LEARNING_RATE = 1e-3
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     

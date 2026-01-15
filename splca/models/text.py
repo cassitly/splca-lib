@@ -4,6 +4,7 @@
 import torch
 import torch.nn as nn
 from ..layers import SPLCALinear
+from ..modulation import SPLCAModulator
 
 
 class TextClassifier(nn.Module):
@@ -28,6 +29,7 @@ class TextClassifier(nn.Module):
         self.fc1 = SPLCALinear(hidden_dim * 2, hidden_dim)
         self.fc2 = SPLCALinear(hidden_dim, num_classes)
         self.splca_layers = [self.fc1, self.fc2]
+        self.modulator = SPLCAModulator(mode='validation')
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.embedding(x)
@@ -37,11 +39,17 @@ class TextClassifier(nn.Module):
         x = self.fc2(x)
         return x
     
-    def get_splca_updates(self) -> list:
-        updates = []
-        # FIXED: Predict current from previous
+    def apply_splca_updates(self, val_loss: float, learning_rate: float = 1e-3):
+        modulatory_scalar = self.modulator(val_loss)
         for layer in self.splca_layers:
-            if layer.current_output is not None and layer.prev_output is not None:
-                error = layer.compute_local_error(layer.current_output)
-                updates.append(layer.get_update_dict(error))
-        return updates
+            layer.update_eligibility_trace()
+            layer.apply_splca_update(learning_rate, modulatory_scalar)
+
+    @staticmethod
+    def preprocess_text(texts, tokenizer, max_length):
+        '''
+        Tokenize and pad text inputs.
+        '''
+        tokenized = [tokenizer(text) for text in texts]
+        padded = [tokens[:max_length] + [0] * (max_length - len(tokens)) for tokens in tokenized]
+        return torch.tensor(padded, dtype=torch.long)

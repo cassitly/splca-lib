@@ -66,3 +66,20 @@ class LearnedModulator(nn.Module):
     def forward(self, stats: torch.Tensor) -> float:
         '''stats: tensor of recent metrics (losses, accuracies, etc.)'''
         return self.net(stats).item()
+
+
+class SPLCAModulator:
+    '''
+    Compute modulatory scalar for SPLCA using validation loss or reward signals.
+    '''
+    
+    def __init__(self, mode: str = 'validation', alpha: float = 1.0, window: int = 10, baseline_momentum: float = 0.9):
+        if mode == 'validation':
+            self.modulator = ValidationModulator(alpha, window)
+        elif mode == 'reward':
+            self.modulator = RewardModulator(alpha, baseline_momentum)
+        else:
+            raise ValueError("Unsupported mode. Use 'validation' or 'reward'.")
+        
+    def __call__(self, signal: float) -> float:
+        return self.modulator(signal)
