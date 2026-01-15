@@ -8,8 +8,8 @@ from ..layers import SPLCALinear
 
 class TextClassifier(nn.Module):
     '''
-    Simple text classification model using SPLCA layers.
-    Embeddings → SPLCA Linear → SPLCA Linear → Output
+    Enhanced text classification model using SPLCA layers.
+    Embeddings → BiLSTM → SPLCA Linear → SPLCA Linear → Output
     '''
     
     def __init__(
@@ -22,12 +22,16 @@ class TextClassifier(nn.Module):
     ):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
-        self.fc1 = SPLCALinear(embed_dim, hidden_dim)
+        self.bilstm = nn.LSTM(
+            embed_dim, hidden_dim, batch_first=True, bidirectional=True
+        )
+        self.fc1 = SPLCALinear(hidden_dim * 2, hidden_dim)
         self.fc2 = SPLCALinear(hidden_dim, num_classes)
         self.splca_layers = [self.fc1, self.fc2]
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.embedding(x)
+        x, _ = self.bilstm(x)
         x = x.mean(dim=1)
         x = torch.relu(self.fc1(x))
         x = self.fc2(x)

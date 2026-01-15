@@ -13,19 +13,37 @@ from torch.utils.data import Dataset, DataLoader
 
 from splca import SPLCAOptimizer, TextClassifier, ValidationModulator
 from splca.utils import train_splca_model, plot_training_history
+from torchtext.datasets import AG_NEWS
+from torchtext.data.utils import get_tokenizer
+from torchtext.vocab import build_vocab_from_iterator
 
 
-class SimpleTextDataset(Dataset):
-    '''Dummy text dataset for demo'''
-    def __init__(self, num_samples=1000, vocab_size=5000, max_length=50):
-        self.data = torch.randint(0, vocab_size, (num_samples, max_length))
-        self.labels = torch.randint(0, 2, (num_samples,))
-    
+class AGNewsDataset(Dataset):
+    """AG News Dataset for text classification"""
+    def __init__(self, data_iter):
+        tokenizer = get_tokenizer("basic_english")
+        
+        def yield_tokens(data_iter):
+            for _, text in data_iter:
+                yield tokenizer(text)
+        
+        vocab = build_vocab_from_iterator(yield_tokens(data_iter), specials=["<unk>"])
+        vocab.set_default_index(vocab["<unk>"])
+        
+        def text_pipeline(x):
+            return vocab(tokenizer(x))
+        
+        def label_pipeline(x):
+            return int(x) - 1
+        
+        self.data = [(text_pipeline(text), label_pipeline(label)) for label, text in data_iter]
+
     def __len__(self):
         return len(self.data)
-    
+
     def __getitem__(self, idx):
-        return self.data[idx], self.labels[idx]
+        text, label = self.data[idx]
+        return torch.tensor(text), torch.tensor(label)
 
 
 def main():
@@ -35,18 +53,20 @@ def main():
     HIDDEN_DIM = 256
     NUM_CLASSES = 2
     BATCH_SIZE = 64
-    EPOCHS = 15
+    EPOCHS = 95
     LEARNING_RATE = 1e-3
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     print(f'Using device: {DEVICE}')
     
-    # Create dummy datasets
-    train_dataset = SimpleTextDataset(num_samples=2000)
-    test_dataset = SimpleTextDataset(num_samples=500)
+    # Use a realistic text dataset
+    train_iter, test_iter = AG_NEWS(split=("train", "test"))
     
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    train_dataset = AGNewsDataset(train_iter)
+    test_dataset = AGNewsDataset(test_iter)
+    
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=lambda x: zip(*x))
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=lambda x: zip(*x))
     
     # Model
     model = TextClassifier(

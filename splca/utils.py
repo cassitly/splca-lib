@@ -14,6 +14,8 @@ def train_splca_model(
     modulator,
     epochs: int = 10,
     device: str = 'cpu',
+    grad_accum_steps: int = 1,  # Gradient accumulation steps
+    weight_decay: float = 1e-4,  # Regularization
 ):
     model.to(device)
     history = {'train_loss': [], 'val_loss': [], 'val_acc': [], 'modulation': []}
@@ -23,6 +25,7 @@ def train_splca_model(
     for epoch in range(epochs):
         model.train()
         train_loss = 0.0
+        optimizer.zero_grad()  # Clear gradients at the start of each epoch
 
         for batch_idx, (data, target) in enumerate(train_loader):
             data, target = data.to(device, non_blocking=True), target.to(device, non_blocking=True)
@@ -36,41 +39,26 @@ def train_splca_model(
                 continue
 
             loss = criterion(output, target)
+            loss = loss / grad_accum_steps  # Scale loss for gradient accumulation
 
-            # Get SPLCA updates
-            updates = model.get_splca_updates()
+            # Backward pass
+            loss.backward()
 
-            # Apply SPLCA update
-            optimizer.step(updates)
+            # Gradient accumulation
+            if (batch_idx + 1) % grad_accum_steps == 0 or (batch_idx + 1) == len(train_loader):
+                # Apply weight decay manually
+                for param in model.parameters():
+                    if param.grad is not None:
+                        param.grad.add_(weight_decay * param)
 
-            # Optimize predictor updates
-            for layer in model.splca_layers:
-                if hasattr(layer, 'predictor') and layer.prev_output is not None:
-                    pred_out = layer.predict_next()
-                    if pred_out is not None and layer.current_output is not None:
-                        pred_out_clipped = torch.clamp(pred_out, -10.0, 10.0)
-                        target_clipped = torch.clamp(layer.current_output.detach(), -10.0, 10.0)
+                # Get SPLCA updates
+                layer_updates = model.get_splca_updates()
 
-                        # Ensure sizes match
-                        if pred_out_clipped.size() != target_clipped.size():
-                            min_size = [
-                                min(pred_out_clipped.size(i), target_clipped.size(i))
-                                for i in range(len(pred_out_clipped.size()))
-                            ]
-                            pred_out_clipped = pred_out_clipped[tuple(slice(0, s) for s in min_size)]
-                            target_clipped = target_clipped[tuple(slice(0, s) for s in min_size)]
+                # Apply SPLCA update
+                optimizer.step(layer_updates)  # Pass layer updates to optimizer
+                optimizer.zero_grad()  # Clear gradients
 
-                        pred_loss = ((pred_out_clipped - target_clipped)**2).mean()
-
-                        if not torch.isnan(pred_loss) and not torch.isinf(pred_loss) and pred_loss < 1000.0:
-                            pred_loss.backward()
-                            for p in layer.predictor.parameters():
-                                if p.grad is not None:
-                                    # Simplified gradient update
-                                    p.data.add_(-optimizer.eta_pred, p.grad)
-                                    p.grad.zero_()
-
-            train_loss += loss.item()
+            train_loss += loss.item() * grad_accum_steps  # Scale back accumulated loss
 
         # Validation
         model.eval()
