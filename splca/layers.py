@@ -58,6 +58,13 @@ class SPLCALinear(nn.Module):
         predicted = self.predict_next()
         if predicted is None:
             return torch.zeros_like(target_activation)
+
+        # Ensure sizes match
+        if predicted.size() != target_activation.size():
+            min_size = [min(predicted.size(i), target_activation.size(i)) for i in range(len(predicted.size()))]
+            predicted = predicted[tuple(slice(0, s) for s in min_size)]
+            target_activation = target_activation[tuple(slice(0, s) for s in min_size)]
+
         return target_activation.detach() - predicted
     
     def get_update_dict(self, error: torch.Tensor) -> dict:
@@ -120,6 +127,13 @@ class SPLCAConv2d(nn.Module):
         predicted = self.predict_next()
         if predicted is None:
             return torch.zeros_like(target_activation)
+
+        # Ensure sizes match
+        if predicted.size() != target_activation.size():
+            min_size = [min(predicted.size(i), target_activation.size(i)) for i in range(len(predicted.size()))]
+            predicted = predicted[tuple(slice(0, s) for s in min_size)]
+            target_activation = target_activation[tuple(slice(0, s) for s in min_size)]
+
         return target_activation.detach() - predicted
     
     def get_update_dict(self, error: torch.Tensor) -> dict:

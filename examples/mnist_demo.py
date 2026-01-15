@@ -18,7 +18,7 @@ from splca.utils import train_splca_model, plot_training_history
 def main():
     # Hyperparameters
     BATCH_SIZE = 128
-    EPOCHS = 20
+    EPOCHS = 5
     LEARNING_RATE = 1e-3
     GAMMA = 0.95
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
