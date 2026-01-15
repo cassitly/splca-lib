@@ -34,7 +34,6 @@ class SPLCAOptimizer:
         eta_pred: Learning rate for predictors
         eta_heb: Hebbian term coefficient
         eta_stab: Weight stabilization (decay) coefficient
-        predictor_lr: Separate learning rate for predictor networks
     '''
     
     def __init__(
@@ -94,24 +93,58 @@ class SPLCAOptimizer:
                     param.shape, self.gamma, param.device
                 )
             
+            # FIXED: Proper dimension handling
+            if error.dim() > 1:
+                error_mean = error.mean(0)
+            else:
+                error_mean = error
+            
+            if presyn.dim() > 1:
+                presyn_mean = presyn.mean(0)
+            else:
+                presyn_mean = presyn
+                
             # Update eligibility trace
-            trace = self.traces[param_id].update(presyn)
+            trace = self.traces[param_id]
+            trace.trace = self.gamma * trace.trace + presyn_mean.view_as(trace.trace).detach()
             
-            # Compute SPLCA update
-            # Δw = -η·m·e·E
-            delta_w = -self.lr * self.modulatory_scalar * (
-                torch.outer(error.mean(0), trace.mean(0))
-            )
+            # Compute SPLCA update: Δw = -η·m·e·E
+            if param.dim() == 2:  # Linear layer weight
+                error_expanded = error_mean.view(-1, 1) if error_mean.dim() == 1 else error_mean
+                trace_expanded = trace.trace.view(1, -1) if trace.trace.dim() == 1 else trace.trace
+                
+                # Match dimensions safely
+                if error_expanded.size(0) != param.size(0):
+                    error_expanded = error_expanded[:param.size(0)]
+                if trace_expanded.size(1) != param.size(1):
+                    trace_expanded = trace_expanded[:, :param.size(1)]
+                    
+                delta_w = -self.lr * self.modulatory_scalar * (error_expanded * trace_expanded.mean(0, keepdim=True))
+            else:  # Conv weights
+                delta_w = -self.lr * self.modulatory_scalar * trace.trace
             
-            # Hebbian term: -η_heb·(y⊗x)
+            # Hebbian term
             if postsyn is not None:
-                hebbian = -self.eta_heb * torch.outer(
-                    postsyn.mean(0), presyn.mean(0)
-                )
-                delta_w += hebbian
+                if postsyn.dim() > 1:
+                    postsyn_mean = postsyn.mean(0)
+                else:
+                    postsyn_mean = postsyn
+                    
+                if param.dim() == 2:
+                    post_expanded = postsyn_mean.view(-1, 1) if postsyn_mean.dim() == 1 else postsyn_mean
+                    pre_expanded = presyn_mean.view(1, -1) if presyn_mean.dim() == 1 else presyn_mean
+                    
+                    if post_expanded.size(0) != param.size(0):
+                        post_expanded = post_expanded[:param.size(0)]
+                    if pre_expanded.size(1) != param.size(1):
+                        pre_expanded = pre_expanded[:, :param.size(1)]
+                        
+                    hebbian = -self.eta_heb * (post_expanded * pre_expanded.mean(0, keepdim=True))
+                    delta_w = delta_w + hebbian
             
-            # Weight stabilization (decay)
-            delta_w -= self.eta_stab * param.data
+            # Weight decay
+            delta_w = delta_w - self.eta_stab * param.data
             
             # Apply update
-            param.data += delta_w
+            with torch.no_grad():
+                param.data.add_(delta_w)
