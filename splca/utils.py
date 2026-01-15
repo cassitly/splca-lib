@@ -15,21 +15,6 @@ def train_splca_model(
     epochs: int = 10,
     device: str = 'cpu',
 ):
-    '''
-    Training loop for SPLCA models.
-    
-    Args:
-        model: SPLCA model (TextClassifier, VisionClassifier, etc.)
-        train_loader: DataLoader for training
-        val_loader: DataLoader for validation
-        optimizer: SPLCAOptimizer instance
-        modulator: Modulator instance (ValidationModulator, etc.)
-        epochs: Number of training epochs
-        device: Device to train on
-    
-    Returns:
-        Dictionary with training history
-    '''
     model.to(device)
     history = {'train_loss': [], 'val_loss': [], 'val_acc': [], 'modulation': []}
     
@@ -52,14 +37,13 @@ def train_splca_model(
             # Apply SPLCA update
             optimizer.step(updates)
             
-            # Update predictors (separate backward pass)
+            # FIXED: Update predictors with proper check
             for layer in model.splca_layers:
-                if hasattr(layer, 'predictor'):
+                if hasattr(layer, 'predictor') and layer.prev_output is not None:
                     pred_out = layer.predict_next()
                     if pred_out is not None and layer.current_output is not None:
                         pred_loss = ((pred_out - layer.current_output.detach())**2).mean()
                         pred_loss.backward()
-                        # Simple SGD update for predictor
                         for p in layer.predictor.parameters():
                             if p.grad is not None:
                                 p.data -= optimizer.eta_pred * p.grad
@@ -105,10 +89,8 @@ def train_splca_model(
 
 
 def plot_training_history(history: Dict[str, List[float]], save_path: str = None):
-    '''Plot training curves'''
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     
-    # Loss curves
     axes[0, 0].plot(history['train_loss'], label='Train Loss')
     axes[0, 0].plot(history['val_loss'], label='Val Loss')
     axes[0, 0].set_xlabel('Epoch')
@@ -116,19 +98,16 @@ def plot_training_history(history: Dict[str, List[float]], save_path: str = None
     axes[0, 0].legend()
     axes[0, 0].set_title('Training and Validation Loss')
     
-    # Accuracy
     axes[0, 1].plot(history['val_acc'])
     axes[0, 1].set_xlabel('Epoch')
     axes[0, 1].set_ylabel('Accuracy')
     axes[0, 1].set_title('Validation Accuracy')
     
-    # Modulation
     axes[1, 0].plot(history['modulation'])
     axes[1, 0].set_xlabel('Epoch')
     axes[1, 0].set_ylabel('m(t)')
     axes[1, 0].set_title('Global Modulatory Scalar')
     
-    # Remove empty subplot
     fig.delaxes(axes[1, 1])
     
     plt.tight_layout()
