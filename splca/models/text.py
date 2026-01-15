@@ -27,24 +27,17 @@ class TextClassifier(nn.Module):
         self.splca_layers = [self.fc1, self.fc2]
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (batch, seq_len) token ids
-        x = self.embedding(x)  # (batch, seq, embed)
-        x = x.mean(dim=1)  # simple pooling
+        x = self.embedding(x)
+        x = x.mean(dim=1)
         x = torch.relu(self.fc1(x))
         x = self.fc2(x)
         return x
     
     def get_splca_updates(self) -> list:
-        '''Collect update dicts from all SPLCA layers'''
         updates = []
-        
-        # Compute predictions and errors
-        for i, layer in enumerate(self.splca_layers[:-1]):
-            next_layer = self.splca_layers[i + 1]
-            next_output = next_layer.current_output
-            if next_output is not None:
-                error = layer.compute_local_error(next_output)
+        # FIXED: Predict current from previous
+        for layer in self.splca_layers:
+            if layer.current_output is not None and layer.prev_output is not None:
+                error = layer.compute_local_error(layer.current_output)
                 updates.append(layer.get_update_dict(error))
-        
-        # Last layer uses output error (if available via external signal)
         return updates
