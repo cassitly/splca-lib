@@ -93,7 +93,7 @@ class SPLCAOptimizer:
                     param.shape, self.gamma, param.device
                 )
             
-            # FIXED: Proper dimension handling
+            # Process dimensions
             if error.dim() > 1:
                 error_mean = error.mean(0)
             else:
@@ -103,25 +103,64 @@ class SPLCAOptimizer:
                 presyn_mean = presyn.mean(0)
             else:
                 presyn_mean = presyn
-                
-            # Update eligibility trace
+            
+            # CRITICAL FIX: Handle trace update based on parameter type
             trace = self.traces[param_id]
-            trace.trace = self.gamma * trace.trace + presyn_mean.view_as(trace.trace).detach()
+            
+            if param.dim() == 2:  # Linear layer: (out_features, in_features)
+                # Ensure presyn_mean matches in_features
+                if presyn_mean.numel() >= param.size(1):
+                    presyn_update = presyn_mean.flatten()[:param.size(1)]
+                else:
+                    presyn_update = torch.zeros(param.size(1), device=param.device)
+                    presyn_update[:presyn_mean.numel()] = presyn_mean.flatten()
+                
+                # Broadcast to trace shape
+                presyn_broadcast = presyn_update.view(1, -1).expand(param.size(0), -1)
+                trace.trace = self.gamma * trace.trace + presyn_broadcast.detach()
+                
+            elif param.dim() == 4:  # Conv layer: (out_channels, in_channels, kH, kW)
+                # For conv layers, just use a scalar update per weight
+                # Simplified: average the input and broadcast
+                presyn_scalar = presyn_mean.mean()
+                trace.trace = self.gamma * trace.trace + presyn_scalar.detach()
+            else:
+                # Default: try to match shapes
+                try:
+                    presyn_reshaped = presyn_mean.view_as(trace.trace)
+                    trace.trace = self.gamma * trace.trace + presyn_reshaped.detach()
+                except:
+                    # Fallback: use scalar
+                    presyn_scalar = presyn_mean.mean()
+                    trace.trace = self.gamma * trace.trace + presyn_scalar.detach()
             
             # Compute SPLCA update: Δw = -η·m·e·E
-            if param.dim() == 2:  # Linear layer weight
-                error_expanded = error_mean.view(-1, 1) if error_mean.dim() == 1 else error_mean
-                trace_expanded = trace.trace.view(1, -1) if trace.trace.dim() == 1 else trace.trace
+            if param.dim() == 2:  # Linear layer
+                # Ensure error_mean matches out_features
+                if error_mean.numel() >= param.size(0):
+                    error_update = error_mean.flatten()[:param.size(0)]
+                else:
+                    error_update = torch.zeros(param.size(0), device=param.device)
+                    error_update[:error_mean.numel()] = error_mean.flatten()
                 
-                # Match dimensions safely
-                if error_expanded.size(0) != param.size(0):
-                    error_expanded = error_expanded[:param.size(0)]
-                if trace_expanded.size(1) != param.size(1):
-                    trace_expanded = trace_expanded[:, :param.size(1)]
-                    
-                delta_w = -self.lr * self.modulatory_scalar * (error_expanded * trace_expanded.mean(0, keepdim=True))
-            else:  # Conv weights
-                delta_w = -self.lr * self.modulatory_scalar * trace.trace
+                # Outer product-like update
+                error_expanded = error_update.view(-1, 1)
+                delta_w = -self.lr * self.modulatory_scalar * (error_expanded * trace.trace)
+                
+            elif param.dim() == 4:  # Conv layer
+                # Element-wise for conv
+                if error_mean.numel() >= param.size(0):
+                    error_update = error_mean.flatten()[:param.size(0)]
+                else:
+                    error_update = torch.zeros(param.size(0), device=param.device)
+                    error_update[:error_mean.numel()] = error_mean.flatten()
+                
+                # Broadcast error to all kernel positions
+                error_expanded = error_update.view(-1, 1, 1, 1).expand_as(param)
+                delta_w = -self.lr * self.modulatory_scalar * (error_expanded * trace.trace)
+            else:
+                # Default element-wise
+                delta_w = -self.lr * self.modulatory_scalar * (error_mean.view_as(param) * trace.trace)
             
             # Hebbian term
             if postsyn is not None:
@@ -129,17 +168,22 @@ class SPLCAOptimizer:
                     postsyn_mean = postsyn.mean(0)
                 else:
                     postsyn_mean = postsyn
-                    
+                
                 if param.dim() == 2:
-                    post_expanded = postsyn_mean.view(-1, 1) if postsyn_mean.dim() == 1 else postsyn_mean
-                    pre_expanded = presyn_mean.view(1, -1) if presyn_mean.dim() == 1 else presyn_mean
+                    # Ensure dimensions match
+                    if postsyn_mean.numel() >= param.size(0):
+                        post_update = postsyn_mean.flatten()[:param.size(0)]
+                    else:
+                        post_update = torch.zeros(param.size(0), device=param.device)
+                        post_update[:postsyn_mean.numel()] = postsyn_mean.flatten()
                     
-                    if post_expanded.size(0) != param.size(0):
-                        post_expanded = post_expanded[:param.size(0)]
-                    if pre_expanded.size(1) != param.size(1):
-                        pre_expanded = pre_expanded[:, :param.size(1)]
-                        
-                    hebbian = -self.eta_heb * (post_expanded * pre_expanded.mean(0, keepdim=True))
+                    if presyn_mean.numel() >= param.size(1):
+                        pre_update = presyn_mean.flatten()[:param.size(1)]
+                    else:
+                        pre_update = torch.zeros(param.size(1), device=param.device)
+                        pre_update[:presyn_mean.numel()] = presyn_mean.flatten()
+                    
+                    hebbian = -self.eta_heb * torch.outer(post_update, pre_update)
                     delta_w = delta_w + hebbian
             
             # Weight decay
