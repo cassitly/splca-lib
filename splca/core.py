@@ -1,5 +1,5 @@
 # ============================================================================
-# splca/core.py
+# splca/core.py - STABILIZED
 # ============================================================================
 import torch
 import torch.nn as nn
@@ -34,16 +34,18 @@ class SPLCAOptimizer:
         eta_pred: Learning rate for predictors
         eta_heb: Hebbian term coefficient
         eta_stab: Weight stabilization (decay) coefficient
+        max_norm: Maximum norm for gradient clipping (prevents explosion)
     '''
     
     def __init__(
         self,
         params,
-        lr: float = 1e-3,
-        gamma: float = 0.95,
-        eta_pred: float = 1e-3,
-        eta_heb: float = 1e-4,
-        eta_stab: float = 1e-5,
+        lr: float = 1e-4,  # REDUCED from 1e-3
+        gamma: float = 0.85,  # REDUCED from 0.95 for faster trace decay
+        eta_pred: float = 1e-4,  # REDUCED from 1e-3
+        eta_heb: float = 1e-5,  # REDUCED from 1e-4
+        eta_stab: float = 1e-4,  # INCREASED from 1e-5 for more regularization
+        max_norm: float = 1.0,  # NEW: gradient clipping
     ):
         self.param_groups = [{'params': list(params)}]
         self.lr = lr
@@ -51,6 +53,7 @@ class SPLCAOptimizer:
         self.eta_pred = eta_pred
         self.eta_heb = eta_heb
         self.eta_stab = eta_stab
+        self.max_norm = max_norm
         
         # Storage for traces and state
         self.traces: Dict[int, EligibilityTrace] = {}
@@ -70,14 +73,7 @@ class SPLCAOptimizer:
     
     def step(self, layer_updates: List[Dict]):
         '''
-        Apply SPLCA updates.
-        
-        Args:
-            layer_updates: List of dicts with keys:
-                - 'param': parameter tensor
-                - 'error': local prediction error
-                - 'presyn': presynaptic activations
-                - 'postsyn': postsynaptic activations
+        Apply SPLCA updates with stability controls.
         '''
         for update_dict in layer_updates:
             param = update_dict['param']
@@ -102,6 +98,12 @@ class SPLCAOptimizer:
                 presyn = presyn.mean(0)
             if postsyn is not None and postsyn.dim() > 1:
                 postsyn = postsyn.mean(0)
+            
+            # STABILITY: Clip error and activations to prevent explosion
+            error = torch.clamp(error, -10.0, 10.0)
+            presyn = torch.clamp(presyn, -10.0, 10.0)
+            if postsyn is not None:
+                postsyn = torch.clamp(postsyn, -10.0, 10.0)
             
             # Flatten all tensors
             error = error.flatten()
@@ -129,9 +131,17 @@ class SPLCAOptimizer:
                 else:
                     presyn = presyn[:in_features]
                 
+                # STABILITY: Normalize presyn before updating trace
+                presyn_norm = presyn / (presyn.norm() + 1e-8)
+                
                 # Update trace: broadcast presyn to match param shape
-                presyn_broadcast = presyn.view(1, -1).expand(out_features, -1)
+                presyn_broadcast = presyn_norm.view(1, -1).expand(out_features, -1)
                 trace.trace = self.gamma * trace.trace + presyn_broadcast.detach()
+                
+                # STABILITY: Normalize trace to prevent unbounded growth
+                trace_norm = trace.trace.norm()
+                if trace_norm > 10.0:
+                    trace.trace = trace.trace * (10.0 / trace_norm)
                 
                 # Compute SPLCA update: Δw = -η·m·e·E
                 error_broadcast = error.view(-1, 1).expand(out_features, in_features)
@@ -147,37 +157,53 @@ class SPLCAOptimizer:
                     else:
                         postsyn = postsyn[:out_features]
                     
-                    hebbian = -self.eta_heb * torch.outer(postsyn, presyn)
+                    hebbian = -self.eta_heb * torch.outer(postsyn, presyn_norm)
                     delta_w = delta_w + hebbian
                 
             elif param.dim() == 4:  # Conv layer: (out_channels, in_channels, kH, kW)
-                out_ch, in_ch, kH, kW = param.shape
-                
                 # For conv, use scalar updates (simplified)
-                error_scalar = error.mean() if error.numel() > 0 else torch.tensor(0.0, device=param.device)
-                presyn_scalar = presyn.mean() if presyn.numel() > 0 else torch.tensor(0.0, device=param.device)
+                error_scalar = torch.clamp(error.mean(), -1.0, 1.0)
+                presyn_scalar = torch.clamp(presyn.mean(), -1.0, 1.0)
                 
                 # Update trace with scalar
                 trace.trace = self.gamma * trace.trace + presyn_scalar.detach()
+                
+                # Clip trace
+                trace.trace = torch.clamp(trace.trace, -10.0, 10.0)
                 
                 # Scalar update broadcasted
                 delta_w = -self.lr * self.modulatory_scalar * error_scalar * trace.trace
                 
                 # Simplified Hebbian for conv
                 if postsyn is not None:
-                    postsyn_scalar = postsyn.mean() if postsyn.numel() > 0 else torch.tensor(0.0, device=param.device)
+                    postsyn_scalar = torch.clamp(postsyn.mean(), -1.0, 1.0)
                     hebbian_scalar = -self.eta_heb * postsyn_scalar * presyn_scalar
                     delta_w = delta_w + hebbian_scalar
             
             else:
                 # For other param types, use element-wise update
-                error_scalar = error.mean()
-                trace.trace = self.gamma * trace.trace + presyn.mean().detach()
+                error_scalar = torch.clamp(error.mean(), -1.0, 1.0)
+                presyn_scalar = torch.clamp(presyn.mean(), -1.0, 1.0)
+                trace.trace = self.gamma * trace.trace + presyn_scalar.detach()
+                trace.trace = torch.clamp(trace.trace, -10.0, 10.0)
                 delta_w = -self.lr * self.modulatory_scalar * error_scalar * trace.trace
             
-            # Weight stabilization (decay)
+            # Weight stabilization (decay) - MORE AGGRESSIVE
             delta_w = delta_w - self.eta_stab * param.data
+            
+            # CRITICAL: Gradient clipping to prevent explosion
+            delta_norm = delta_w.norm()
+            if delta_norm > self.max_norm:
+                delta_w = delta_w * (self.max_norm / delta_norm)
+            
+            # STABILITY: Check for NaN/Inf before applying
+            if torch.isnan(delta_w).any() or torch.isinf(delta_w).any():
+                print(f"Warning: NaN/Inf detected in update, skipping this step")
+                continue
             
             # Apply update
             with torch.no_grad():
                 param.data.add_(delta_w)
+                
+                # SAFETY: Clamp weights to reasonable range
+                param.data.clamp_(-10.0, 10.0)
