@@ -57,3 +57,34 @@ class VisionClassifier(nn.Module):
         for layer in self.splca_layers:
             layer.update_eligibility_trace()
             layer.apply_splca_update(learning_rate, modulatory_scalar)
+
+    def get_splca_updates(self):
+        '''
+        Collect SPLCA updates from all layers.
+        Returns list of dicts with update information.
+        '''
+        updates = []
+        
+        # Convolutional layers
+        for layer in self.splca_conv_layers:
+            if layer.current_output is not None:
+                local_error = layer.compute_local_error(layer.current_output)
+                update_dict = layer.get_update_dict(local_error)
+                updates.append(update_dict)
+        
+        # Linear layers
+        for layer in self.splca_linear_layers:
+            local_error = layer.compute_local_error()
+            if local_error is not None and layer.current_input is not None:
+                error_agg = local_error.mean(dim=0)
+                input_agg = layer.current_input.mean(dim=0)
+                output_agg = layer.current_output.mean(dim=0) if layer.current_output is not None else None
+                
+                updates.append({
+                    'param': layer.linear.weight,
+                    'error': error_agg,
+                    'presyn': input_agg,
+                    'postsyn': output_agg,
+                })
+        
+        return updates

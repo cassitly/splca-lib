@@ -1,4 +1,12 @@
 *.egg-info/
 .venv/
 __pycache__/
-data/
+
+.data/
+.vscode/
+*.lock
+.pdm-python
+
+# Local files
+dump-files.py
+file-dump.txt

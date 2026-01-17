@@ -61,10 +61,17 @@ class SPLCALinear(nn.Module):
         Compute local prediction error.
         '''
         if self.current_output is None or self.prev_output is None:
-            return None
+            return torch.zeros_like(self.current_output)
         predicted_next = self.predict_next()
         if predicted_next is None:
-            return None
+            return torch.zeros_like(self.current_output)
+        
+        # Ensure sizes match
+        if predicted_next.size() != self.current_output.size():
+            min_size = [min(predicted_next.size(i), self.current_output.size(i)) for i in range(len(predicted_next.size()))]
+            predicted_next = predicted_next[tuple(slice(0, s) for s in min_size)]
+            self.current_output = self.current_output[tuple(slice(0, s) for s in min_size)]
+        
         return self.current_output - predicted_next
 
     def update_eligibility_trace(self, gamma: float = 0.95):

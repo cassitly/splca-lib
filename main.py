@@ -1,5 +1,6 @@
 def main():
-    print("Hello from splca-lib!")
+    print('SPLCA is not meant to be run as a standalone file.')
+    print('It is just a python library, that implements the SPLCA Architecture.')
 
 
 if __name__ == "__main__":

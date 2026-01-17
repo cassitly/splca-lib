@@ -44,3 +44,25 @@ class AudioClassifier(nn.Module):
         for layer in self.splca_layers:
             layer.update_eligibility_trace()
             layer.apply_splca_update(learning_rate, modulatory_scalar)
+
+    def get_splca_updates(self):
+        '''
+        Collect SPLCA updates from all layers.
+        Returns list of dicts with update information.
+        '''
+        updates = []
+        for layer in self.splca_layers:
+            local_error = layer.compute_local_error()
+            if local_error is not None and layer.current_input is not None:
+                # Aggregate over batch dimension
+                error_agg = local_error.mean(dim=0)
+                input_agg = layer.current_input.mean(dim=0)
+                output_agg = layer.current_output.mean(dim=0) if layer.current_output is not None else None
+                
+                updates.append({
+                    'param': layer.linear.weight,
+                    'error': error_agg,
+                    'presyn': input_agg,
+                    'postsyn': output_agg,
+                })
+        return updates

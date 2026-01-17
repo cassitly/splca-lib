@@ -33,12 +33,12 @@ with open("README.md", "r", encoding="utf-8") as fh:
 setup(
     name="splca",
     version="0.1.0",
-    author="Your Name",
-    author_email="your.email@example.com",
+    author="Cassitly",
+    author_email="cassitly@nakashireyumi.com",
     description="Self-Predictive Local Credit Assignment: Biologically-plausible learning for neural networks",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/splca",
+    url="https://github.com/cassitly/splca",
     packages=find_packages(),
     classifiers=[
         "Development Status :: 3 - Alpha",
