@@ -127,9 +127,9 @@ If you use this library, please cite:
 ```bibtex
 @software{splca2024,
   title={SPLCA: Self-Predictive Local Credit Assignment},
-  author={Your Name},
+  author={Cassitly},
   year={2024},
-  url={https://github.com/yourusername/splca}
+  url={https://github.com/cassitly/splca}
 }
 ```
 
